@@ -108,6 +108,14 @@ struct Unit {
     movement_range: i32,
 }
 
+struct UnitMovement {
+    entity: Entity,
+    start_position: Vec3,
+    end_position: Vec3,
+    progress: f32,
+    speed: f32,
+}
+
 #[derive(Clone, Copy, PartialEq, Default)]
 enum SelectionState {
     #[default]
@@ -135,6 +143,7 @@ struct HexWarState {
     hovered_unit: Option<Entity>,
     valid_move_tiles: HashSet<HexCoord>,
     fps_text_entity: Option<Entity>,
+    active_movements: Vec<UnitMovement>,
 }
 
 impl Default for HexWarState {
@@ -159,6 +168,7 @@ impl Default for HexWarState {
             hovered_unit: None,
             valid_move_tiles: HashSet::new(),
             fps_text_entity: None,
+            active_movements: Vec::new(),
         }
     }
 }
@@ -650,22 +660,60 @@ impl HexWarState {
         if let Some(index) = unit_index {
             self.units[index].hex_coord = destination;
 
-            let new_position = hex_to_world_position(
+            let end_position = hex_to_world_position(
                 destination.column,
                 destination.row,
                 self.hex_width,
                 self.hex_depth,
             );
 
-            if let Some(transform) = world.get_local_transform_mut(unit_entity) {
+            if let Some(transform) = world.get_local_transform(unit_entity) {
+                let start_position = transform.translation;
                 let unit_radius = 30.0;
-                transform.translation = nalgebra_glm::vec3(
-                    new_position.x,
-                    new_position.y + unit_radius + 10.0,
-                    new_position.z,
+                let end_position_with_height = nalgebra_glm::vec3(
+                    end_position.x,
+                    end_position.y + unit_radius + 10.0,
+                    end_position.z,
                 );
-                world.set_local_transform_dirty(unit_entity, LocalTransformDirty);
+
+                self.active_movements.push(UnitMovement {
+                    entity: unit_entity,
+                    start_position,
+                    end_position: end_position_with_height,
+                    progress: 0.0,
+                    speed: 2.0,
+                });
             }
+        }
+    }
+
+    fn update_unit_movements(&mut self, world: &mut World, delta_time: f32) {
+        let mut completed_indices = Vec::new();
+
+        for (movement_index, movement) in self.active_movements.iter_mut().enumerate() {
+            movement.progress += delta_time * movement.speed;
+
+            let t = movement.progress.clamp(0.0, 1.0);
+            let smooth_t = t * t * (3.0 - 2.0 * t);
+
+            let current_position = nalgebra_glm::lerp(
+                &movement.start_position,
+                &movement.end_position,
+                smooth_t,
+            );
+
+            if let Some(transform) = world.get_local_transform_mut(movement.entity) {
+                transform.translation = current_position;
+                world.set_local_transform_dirty(movement.entity, LocalTransformDirty);
+            }
+
+            if movement.progress >= 1.0 {
+                completed_indices.push(movement_index);
+            }
+        }
+
+        for movement_index in completed_indices.into_iter().rev() {
+            self.active_movements.swap_remove(movement_index);
         }
     }
 }
@@ -1008,6 +1056,9 @@ impl State for HexWarState {
     fn run_systems(&mut self, world: &mut World) {
         pan_orbit_camera_system(world);
 
+        let delta_time = world.resources.window.timing.delta_time;
+        self.update_unit_movements(world, delta_time);
+
         let fps = world.resources.window.timing.frames_per_second;
         if let Some(fps_entity) = self.fps_text_entity {
             let text_index = world.get_hud_text(fps_entity).map(|t| t.text_index);
@@ -1234,7 +1285,6 @@ impl State for HexWarState {
                         && let Some(coord) = self.tile_coords.get(&clicked_tile)
                         && self.valid_move_tiles.contains(coord) {
                             self.move_unit_to(world, selected_entity, *coord);
-                            self.clear_selection(world);
                     } else if closest_unit == Some(selected_entity) {
                         self.clear_selection(world);
                     }
