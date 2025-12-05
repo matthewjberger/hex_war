@@ -6,10 +6,9 @@ use nightshade::ecs::world::{
 use nightshade::prelude::*;
 use rand::Rng;
 use std::collections::HashSet;
-use std::path::Path;
 
-const GLTF_PATH: &str = "assets/hexagon_tiles.glb";
-const GRASS_GLTF_PATH: &str = "assets/grass.glb";
+const HEXAGON_TILES_GLB: &[u8] = include_bytes!("../assets/hexagon_tiles.glb");
+const GRASS_GLB: &[u8] = include_bytes!("../assets/grass.glb");
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     launch(HexWarState::default())?;
@@ -432,11 +431,8 @@ impl State for HexWarState {
 
         spawn_sun(world);
 
-        let gltf_path = Path::new(GLTF_PATH);
-        let load_result = nightshade::ecs::prefab::import_gltf_from_path(gltf_path);
-
-        let grass_path = Path::new(GRASS_GLTF_PATH);
-        let grass_load_result = nightshade::ecs::prefab::import_gltf_from_path(grass_path);
+        let load_result = nightshade::ecs::prefab::import_gltf_from_bytes(HEXAGON_TILES_GLB);
+        let grass_load_result = nightshade::ecs::prefab::import_gltf_from_bytes(GRASS_GLB);
 
         match (load_result, grass_load_result) {
             (Ok(result), Ok(grass_result)) => {

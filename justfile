@@ -78,3 +78,9 @@ build-steamdeck:
 deploy-steamdeck:
     just build-steamdeck
     scp ./target/x86_64-unknown-linux-gnu/release/hex_war deck@steamdeck.local:~/Downloads
+
+# Builds and deploys the project to Steam Deck as ~/Downloads/game
+deploy-steamdeck-quick:
+    just build-steamdeck
+    scp ./target/x86_64-unknown-linux-gnu/release/hex_war deck@steamdeck.local:~/Downloads/game
+    ssh deck@steamdeck.local "chmod +x ~/Downloads/game"
