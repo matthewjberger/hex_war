@@ -5,7 +5,7 @@ use nightshade::ecs::world::{
 };
 use nightshade::prelude::*;
 use rand::Rng;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const HEXAGON_TILES_GLB: &[u8] = include_bytes!("../assets/hexagon_tiles.glb");
 const GRASS_GLB: &[u8] = include_bytes!("../assets/grass.glb");
@@ -50,19 +50,168 @@ impl Default for MapGenParams {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct HexCoord {
+    column: i32,
+    row: i32,
+}
+
+impl HexCoord {
+    fn new(column: i32, row: i32) -> Self {
+        Self { column, row }
+    }
+
+    fn to_cube(self) -> (i32, i32, i32) {
+        let x = self.column;
+        let z = self.row - (self.column - (self.column & 1)) / 2;
+        let y = -x - z;
+        (x, y, z)
+    }
+
+    fn tiles_in_range(&self, range: i32) -> Vec<HexCoord> {
+        let mut result = Vec::new();
+        for distance in 1..=range {
+            let tiles_at_distance = self.tiles_at_distance(distance);
+            result.extend(tiles_at_distance);
+        }
+        result
+    }
+
+    fn tiles_at_distance(&self, distance: i32) -> Vec<HexCoord> {
+        if distance == 0 {
+            return vec![*self];
+        }
+        let mut result = Vec::new();
+        let (cx, cy, cz) = self.to_cube();
+        for x in -distance..=distance {
+            for y in (-distance).max(-x - distance)..=(distance).min(-x + distance) {
+                let z = -x - y;
+                if x.abs() + y.abs() + z.abs() == distance * 2 {
+                    let coord = HexCoord::from_cube(cx + x, cy + y, cz + z);
+                    result.push(coord);
+                }
+            }
+        }
+        result
+    }
+
+    fn from_cube(x: i32, _y: i32, z: i32) -> Self {
+        let column = x;
+        let row = z + (x - (x & 1)) / 2;
+        Self { column, row }
+    }
+}
+
+struct Unit {
+    entity: Entity,
+    hex_coord: HexCoord,
+    movement_range: i32,
+}
+
+#[derive(Clone, Copy, PartialEq, Default)]
+enum SelectionState {
+    #[default]
+    None,
+    UnitSelected(Entity),
+}
+
 struct HexWarState {
     tiles: Vec<Entity>,
+    tile_coords: HashMap<Entity, HexCoord>,
+    coord_to_tile: HashMap<HexCoord, Entity>,
     lines_entity: Option<Entity>,
-    hovered_entity: Option<Entity>,
-    selected_entities: HashSet<Entity>,
-    original_colors: std::collections::HashMap<Entity, [f32; 4]>,
+    hovered_tile: Option<Entity>,
+    original_colors: HashMap<Entity, [f32; 4]>,
     tile_prefabs: Vec<Prefab>,
     hex_width: f32,
     hex_depth: f32,
     rng_seed: u32,
     params: MapGenParams,
     needs_regeneration: bool,
+    units: Vec<Unit>,
+    selected_unit: Option<Entity>,
+    selection_state: SelectionState,
+    range_lines_entity: Option<Entity>,
+    hovered_unit: Option<Entity>,
+    valid_move_tiles: HashSet<HexCoord>,
+}
+
+impl Default for HexWarState {
+    fn default() -> Self {
+        Self {
+            tiles: Vec::new(),
+            tile_coords: HashMap::new(),
+            coord_to_tile: HashMap::new(),
+            lines_entity: None,
+            hovered_tile: None,
+            original_colors: HashMap::new(),
+            tile_prefabs: Vec::new(),
+            hex_width: 0.0,
+            hex_depth: 0.0,
+            rng_seed: 0,
+            params: MapGenParams::default(),
+            needs_regeneration: false,
+            units: Vec::new(),
+            selected_unit: None,
+            selection_state: SelectionState::None,
+            range_lines_entity: None,
+            hovered_unit: None,
+            valid_move_tiles: HashSet::new(),
+        }
+    }
+}
+
+fn spawn_unit(world: &mut World, position: Vec3) -> Entity {
+    let unit_radius = 30.0;
+    let unit_entity = spawn_mesh(
+        world,
+        "Sphere",
+        nalgebra_glm::vec3(position.x, position.y + unit_radius + 10.0, position.z),
+        nalgebra_glm::vec3(unit_radius, unit_radius, unit_radius),
+    );
+
+    if let Some(material) = world.get_material_mut(unit_entity) {
+        material.base_color = [0.2, 0.6, 1.0, 1.0];
+    }
+
+    world.add_components(unit_entity, BOUNDING_VOLUME);
+    let bounding_volume = BoundingVolume {
+        obb: OrientedBoundingBox {
+            center: nalgebra_glm::vec3(0.0, 0.0, 0.0),
+            half_extents: nalgebra_glm::vec3(unit_radius, unit_radius, unit_radius),
+            orientation: nalgebra_glm::quat_identity(),
+        },
+        sphere_radius: unit_radius,
+    };
+    world.set_bounding_volume(unit_entity, bounding_volume);
+
+    unit_entity
+}
+
+fn generate_range_circle_lines(
+    tiles_in_range: &[HexCoord],
+    hex_width: f32,
+    hex_depth: f32,
+    color: Vec4,
+) -> Vec<Line> {
+    let mut lines = Vec::new();
+    let y_offset = 10.0;
+
+    for coord in tiles_in_range {
+        let tile_center = hex_to_world_position(coord.column, coord.row, hex_width, hex_depth);
+        let hex_lines = generate_hex_outline(
+            tile_center,
+            hex_width,
+            hex_depth,
+            y_offset,
+        );
+        for mut line in hex_lines {
+            line.color = color;
+            lines.push(line);
+        }
+    }
+
+    lines
 }
 
 fn generate_hex_outline(center: Vec3, hex_width: f32, hex_height: f32, y_offset: f32) -> Vec<Line> {
@@ -419,6 +568,106 @@ fn tile_type_to_prefab_index(tile_type: TileType) -> usize {
     }
 }
 
+impl HexWarState {
+    fn select_unit(&mut self, world: &mut World, unit_entity: Entity) {
+        self.selected_unit = Some(unit_entity);
+        self.selection_state = SelectionState::UnitSelected(unit_entity);
+
+        if let Some(material) = world.get_material_mut(unit_entity) {
+            material.base_color = [1.0, 0.8, 0.2, 1.0];
+        }
+
+        let unit_index = self.units.iter().position(|u| u.entity == unit_entity);
+        if let Some(index) = unit_index {
+            let unit = &self.units[index];
+            let tiles_in_range = unit.hex_coord.tiles_in_range(unit.movement_range);
+
+            self.valid_move_tiles.clear();
+            for coord in &tiles_in_range {
+                if self.coord_to_tile.contains_key(coord) {
+                    let is_occupied = self.units.iter().any(|u| u.hex_coord == *coord);
+                    if !is_occupied {
+                        self.valid_move_tiles.insert(*coord);
+                    }
+                }
+            }
+
+            let valid_coords: Vec<HexCoord> = self.valid_move_tiles.iter().copied().collect();
+            let range_lines = generate_range_circle_lines(
+                &valid_coords,
+                self.hex_width,
+                self.hex_depth,
+                nalgebra_glm::vec4(1.0, 1.0, 0.0, 1.0),
+            );
+
+            if let Some(range_entity) = self.range_lines_entity {
+                if let Some(lines_component) = world.get_lines_mut(range_entity) {
+                    lines_component.lines = range_lines;
+                    lines_component.mark_dirty();
+                }
+                if let Some(visibility) = world.get_visibility_mut(range_entity) {
+                    visibility.visible = true;
+                }
+            }
+
+            for coord in &self.valid_move_tiles {
+                if let Some(&tile_entity) = self.coord_to_tile.get(coord)
+                    && let Some(material) = world.get_material_mut(tile_entity) {
+                        material.base_color = [1.0, 1.0, 0.0, 1.0];
+                    }
+            }
+        }
+    }
+
+    fn clear_selection(&mut self, world: &mut World) {
+        if let Some(selected) = self.selected_unit
+            && let Some(material) = world.get_material_mut(selected) {
+                material.base_color = [0.2, 0.6, 1.0, 1.0];
+            }
+
+        for coord in &self.valid_move_tiles {
+            if let Some(&tile_entity) = self.coord_to_tile.get(coord)
+                && let Some(original_color) = self.original_colors.get(&tile_entity)
+                    && let Some(material) = world.get_material_mut(tile_entity) {
+                        material.base_color = *original_color;
+                    }
+        }
+
+        if let Some(range_entity) = self.range_lines_entity
+            && let Some(visibility) = world.get_visibility_mut(range_entity) {
+                visibility.visible = false;
+            }
+
+        self.selected_unit = None;
+        self.selection_state = SelectionState::None;
+        self.valid_move_tiles.clear();
+    }
+
+    fn move_unit_to(&mut self, world: &mut World, unit_entity: Entity, destination: HexCoord) {
+        let unit_index = self.units.iter().position(|u| u.entity == unit_entity);
+        if let Some(index) = unit_index {
+            self.units[index].hex_coord = destination;
+
+            let new_position = hex_to_world_position(
+                destination.column,
+                destination.row,
+                self.hex_width,
+                self.hex_depth,
+            );
+
+            if let Some(transform) = world.get_local_transform_mut(unit_entity) {
+                let unit_radius = 30.0;
+                transform.translation = nalgebra_glm::vec3(
+                    new_position.x,
+                    new_position.y + unit_radius + 10.0,
+                    new_position.z,
+                );
+                world.set_local_transform_dirty(unit_entity, LocalTransformDirty);
+            }
+        }
+    }
+}
+
 impl State for HexWarState {
     fn title(&self) -> &str {
         "Hex War"
@@ -651,6 +900,10 @@ impl State for HexWarState {
                             nightshade::ecs::prefab::spawn_prefab(world, tile_prefab, position);
                         self.tiles.push(entity);
 
+                        let hex_coord = HexCoord::new(column, row);
+                        self.tile_coords.insert(entity, hex_coord);
+                        self.coord_to_tile.insert(hex_coord, entity);
+
                         world.add_components(entity, BOUNDING_VOLUME);
                         let bounding_volume = BoundingVolume {
                             obb: OrientedBoundingBox {
@@ -684,6 +937,35 @@ impl State for HexWarState {
                     lines_component.mark_dirty();
                 }
                 self.lines_entity = Some(lines_entity);
+
+                let range_lines_entity = world.spawn_entities(
+                    LINES | VISIBILITY | LOCAL_TRANSFORM | GLOBAL_TRANSFORM | LOCAL_TRANSFORM_DIRTY,
+                    1,
+                )[0];
+                if let Some(lines_component) = world.get_lines_mut(range_lines_entity) {
+                    lines_component.lines = Vec::new();
+                    lines_component.mark_dirty();
+                }
+                if let Some(visibility) = world.get_visibility_mut(range_lines_entity) {
+                    visibility.visible = false;
+                }
+                self.range_lines_entity = Some(range_lines_entity);
+
+                let initial_unit_coords = [
+                    HexCoord::new(0, 0),
+                    HexCoord::new(2, 1),
+                    HexCoord::new(-2, -1),
+                ];
+
+                for coord in initial_unit_coords {
+                    let position = hex_to_world_position(coord.column, coord.row, hex_width, hex_depth);
+                    let unit_entity = spawn_unit(world, position);
+                    self.units.push(Unit {
+                        entity: unit_entity,
+                        hex_coord: coord,
+                        movement_range: 3,
+                    });
+                }
             }
             (Err(error), _) => {
                 log::error!("Failed to load GLTF: {}", error);
@@ -719,9 +1001,21 @@ impl State for HexWarState {
                     entity: lines_entity,
                 });
             }
-            self.selected_entities.clear();
-            self.hovered_entity = None;
+            if let Some(range_lines_entity) = self.range_lines_entity.take() {
+                world.queue_command(WorldCommand::DespawnRecursive {
+                    entity: range_lines_entity,
+                });
+            }
+            for unit in self.units.drain(..) {
+                world.queue_command(WorldCommand::DespawnRecursive { entity: unit.entity });
+            }
+            self.tile_coords.clear();
+            self.coord_to_tile.clear();
+            self.hovered_tile = None;
             self.original_colors.clear();
+            self.selected_unit = None;
+            self.selection_state = SelectionState::None;
+            self.valid_move_tiles.clear();
 
             self.rng_seed = rand::rng().random();
             let river_tiles = generate_river_set(&self.params, self.rng_seed);
@@ -739,6 +1033,10 @@ impl State for HexWarState {
                     let entity =
                         nightshade::ecs::prefab::spawn_prefab(world, tile_prefab, position);
                     self.tiles.push(entity);
+
+                    let hex_coord = HexCoord::new(column, row);
+                    self.tile_coords.insert(entity, hex_coord);
+                    self.coord_to_tile.insert(hex_coord, entity);
 
                     world.add_components(entity, BOUNDING_VOLUME);
                     let bounding_volume = BoundingVolume {
@@ -774,59 +1072,148 @@ impl State for HexWarState {
                 lines_component.mark_dirty();
             }
             self.lines_entity = Some(lines_entity);
+
+            let range_lines_entity = world.spawn_entities(
+                LINES | VISIBILITY | LOCAL_TRANSFORM | GLOBAL_TRANSFORM | LOCAL_TRANSFORM_DIRTY,
+                1,
+            )[0];
+            if let Some(lines_component) = world.get_lines_mut(range_lines_entity) {
+                lines_component.lines = Vec::new();
+                lines_component.mark_dirty();
+            }
+            if let Some(visibility) = world.get_visibility_mut(range_lines_entity) {
+                visibility.visible = false;
+            }
+            self.range_lines_entity = Some(range_lines_entity);
+
+            let initial_unit_coords = [
+                HexCoord::new(0, 0),
+                HexCoord::new(2, 1),
+                HexCoord::new(-2, -1),
+            ];
+
+            for coord in initial_unit_coords {
+                let position = hex_to_world_position(coord.column, coord.row, self.hex_width, self.hex_depth);
+                let unit_entity = spawn_unit(world, position);
+                self.units.push(Unit {
+                    entity: unit_entity,
+                    hex_coord: coord,
+                    movement_range: 3,
+                });
+            }
         }
 
         let mouse = &world.resources.input.mouse;
         let mouse_pos = mouse.position;
         let left_clicked = mouse.state.contains(MouseState::LEFT_JUST_PRESSED);
+        let right_clicked = mouse.state.contains(MouseState::RIGHT_JUST_PRESSED);
 
         let picking_results = pick_entities(world, mouse_pos, PickingOptions::default());
 
+        let mut closest_unit: Option<Entity> = None;
         let mut closest_tile: Option<Entity> = None;
-        for result in picking_results {
-            if self.tiles.contains(&result.entity) {
+
+        for result in &picking_results {
+            if closest_unit.is_none() {
+                for unit in &self.units {
+                    if unit.entity == result.entity {
+                        closest_unit = Some(unit.entity);
+                        break;
+                    }
+                }
+            }
+            if closest_tile.is_none() && self.tiles.contains(&result.entity) {
                 closest_tile = Some(result.entity);
+            }
+            if closest_unit.is_some() && closest_tile.is_some() {
                 break;
             }
         }
 
-        if let Some(prev_hovered) = self.hovered_entity
+        if let Some(prev_hovered) = self.hovered_unit
+            && Some(prev_hovered) != closest_unit
+            && self.selected_unit != Some(prev_hovered)
+            && let Some(material) = world.get_material_mut(prev_hovered) {
+                material.base_color = [0.2, 0.6, 1.0, 1.0];
+            }
+        self.hovered_unit = closest_unit;
+
+        if let Some(hovered_unit) = self.hovered_unit
+            && self.selected_unit != Some(hovered_unit)
+                && let Some(material) = world.get_material_mut(hovered_unit) {
+                    material.base_color = [0.5, 0.8, 1.0, 1.0];
+                }
+
+        if let Some(prev_hovered) = self.hovered_tile
             && Some(prev_hovered) != closest_tile
-            && !self.selected_entities.contains(&prev_hovered)
-            && let Some(original_color) = self.original_colors.get(&prev_hovered)
-            && let Some(material) = world.get_material_mut(prev_hovered)
         {
-            material.base_color = *original_color;
+            let is_in_range = if let Some(coord) = self.tile_coords.get(&prev_hovered) {
+                self.valid_move_tiles.contains(coord)
+            } else {
+                false
+            };
+
+            if is_in_range {
+                if let Some(material) = world.get_material_mut(prev_hovered) {
+                    material.base_color = [1.0, 1.0, 0.0, 1.0];
+                }
+            } else if let Some(original_color) = self.original_colors.get(&prev_hovered)
+                && let Some(material) = world.get_material_mut(prev_hovered) {
+                    material.base_color = *original_color;
+                }
+        }
+        self.hovered_tile = closest_tile;
+
+        if let Some(hovered_tile) = self.hovered_tile {
+            let is_in_range = if let Some(coord) = self.tile_coords.get(&hovered_tile) {
+                self.valid_move_tiles.contains(coord)
+            } else {
+                false
+            };
+
+            if is_in_range {
+                if let Some(material) = world.get_material_mut(hovered_tile) {
+                    material.base_color = [1.0, 1.0, 0.5, 1.0];
+                }
+            } else if self.selection_state == SelectionState::None
+                && let Some(material) = world.get_material_mut(hovered_tile) {
+                    material.base_color = [1.0, 1.0, 0.5, 1.0];
+                }
         }
 
-        self.hovered_entity = closest_tile;
+        if right_clicked {
+            self.clear_selection(world);
+        }
 
-        if let Some(hovered) = self.hovered_entity {
-            if !self.selected_entities.contains(&hovered)
-                && let Some(material) = world.get_material_mut(hovered)
-            {
-                material.base_color = [1.0, 1.0, 0.5, 1.0];
-            }
+        if left_clicked {
+            match self.selection_state {
+                SelectionState::None => {
+                    if let Some(clicked_unit) = closest_unit {
+                        self.select_unit(world, clicked_unit);
+                    }
+                }
+                SelectionState::UnitSelected(selected_entity) => {
+                    let clicked_different_unit = closest_unit.is_some() && closest_unit != Some(selected_entity);
 
-            if left_clicked {
-                if self.selected_entities.contains(&hovered) {
-                    self.selected_entities.remove(&hovered);
-                } else {
-                    self.selected_entities.insert(hovered);
-                    if let Some(material) = world.get_material_mut(hovered) {
-                        material.base_color = [0.3, 0.8, 1.0, 1.0];
+                    if clicked_different_unit {
+                        self.clear_selection(world);
+                        self.select_unit(world, closest_unit.unwrap());
+                    } else if let Some(clicked_tile) = closest_tile
+                        && let Some(coord) = self.tile_coords.get(&clicked_tile)
+                        && self.valid_move_tiles.contains(coord) {
+                            self.move_unit_to(world, selected_entity, *coord);
+                            self.clear_selection(world);
+                    } else if closest_unit == Some(selected_entity) {
+                        self.clear_selection(world);
                     }
                 }
             }
         }
 
-        for &selected in &self.selected_entities {
-            if Some(selected) != self.hovered_entity
-                && let Some(material) = world.get_material_mut(selected)
-            {
-                material.base_color = [0.3, 0.8, 1.0, 1.0];
+        if let Some(selected) = self.selected_unit
+            && let Some(material) = world.get_material_mut(selected) {
+                material.base_color = [1.0, 0.8, 0.2, 1.0];
             }
-        }
     }
 
     fn ui(&mut self, _world: &mut World, ui_context: &egui::Context) {
@@ -891,8 +1278,28 @@ impl State for HexWarState {
                 ui.label("Press R key to regenerate");
 
                 ui.separator();
+                ui.heading("Units");
+                ui.label(format!("Units: {}", self.units.len()));
                 ui.label(format!("Tiles: {}", self.tiles.len()));
-                ui.label(format!("Selected: {}", self.selected_entities.len()));
+
+                if let Some(selected) = self.selected_unit {
+                    let unit_info = self.units.iter().find(|u| u.entity == selected);
+                    if let Some(unit) = unit_info {
+                        ui.label(format!(
+                            "Selected unit at ({}, {})",
+                            unit.hex_coord.column, unit.hex_coord.row
+                        ));
+                        ui.label(format!("Movement range: {}", unit.movement_range));
+                        ui.label(format!("Valid moves: {}", self.valid_move_tiles.len()));
+                    }
+                } else {
+                    ui.label("No unit selected");
+                }
+
+                ui.separator();
+                ui.heading("Controls");
+                ui.label("Left-click: Select unit / Move unit");
+                ui.label("Right-click: Deselect");
             });
     }
 
