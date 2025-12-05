@@ -134,6 +134,7 @@ struct HexWarState {
     range_lines_entity: Option<Entity>,
     hovered_unit: Option<Entity>,
     valid_move_tiles: HashSet<HexCoord>,
+    fps_text_entity: Option<Entity>,
 }
 
 impl Default for HexWarState {
@@ -157,6 +158,7 @@ impl Default for HexWarState {
             range_lines_entity: None,
             hovered_unit: None,
             valid_move_tiles: HashSet::new(),
+            fps_text_entity: None,
         }
     }
 }
@@ -985,10 +987,40 @@ impl State for HexWarState {
         );
 
         world.resources.active_camera = Some(camera_entity);
+
+        let fps_props = TextProperties {
+            font_size: 24.0,
+            color: nalgebra_glm::vec4(1.0, 1.0, 1.0, 1.0),
+            alignment: TextAlignment::Right,
+            outline_width: 0.02,
+            outline_color: nalgebra_glm::vec4(0.0, 0.0, 0.0, 1.0),
+            ..Default::default()
+        };
+        self.fps_text_entity = Some(spawn_hud_text_with_properties(
+            world,
+            "FPS: 0",
+            HudAnchor::TopRight,
+            nalgebra_glm::vec2(-10.0, 10.0),
+            fps_props,
+        ));
     }
 
     fn run_systems(&mut self, world: &mut World) {
         pan_orbit_camera_system(world);
+
+        let fps = world.resources.window.timing.frames_per_second;
+        if let Some(fps_entity) = self.fps_text_entity {
+            let text_index = world.get_hud_text(fps_entity).map(|t| t.text_index);
+            if let Some(text_index) = text_index {
+                world
+                    .resources
+                    .text_cache
+                    .set_text(text_index, format!("FPS: {:.0}", fps));
+                if let Some(hud_text) = world.get_hud_text_mut(fps_entity) {
+                    hud_text.dirty = true;
+                }
+            }
+        }
 
         if self.needs_regeneration && !self.tile_prefabs.is_empty() {
             self.needs_regeneration = false;
