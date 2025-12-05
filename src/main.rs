@@ -1,8 +1,8 @@
 use nightshade::ecs::prefab::{Prefab, PrefabNode};
 use nightshade::ecs::world::components::Line;
 use nightshade::ecs::world::{
-    spawn_instanced_mesh_with_material, GLOBAL_TRANSFORM, LINES, LOCAL_TRANSFORM,
-    LOCAL_TRANSFORM_DIRTY, VISIBILITY,
+    GLOBAL_TRANSFORM, LINES, LOCAL_TRANSFORM, LOCAL_TRANSFORM_DIRTY, VISIBILITY,
+    spawn_instanced_mesh_with_material,
 };
 use nightshade::prelude::*;
 use rand::Rng;
@@ -214,12 +214,7 @@ fn generate_range_circle_lines(
 
     for coord in tiles_in_range {
         let tile_center = hex_to_world_position(coord.column, coord.row, hex_width, hex_depth);
-        let hex_lines = generate_hex_outline(
-            tile_center,
-            hex_width,
-            hex_depth,
-            y_offset,
-        );
+        let hex_lines = generate_hex_outline(tile_center, hex_width, hex_depth, y_offset);
         for mut line in hex_lines {
             line.color = color;
             lines.push(line);
@@ -328,8 +323,8 @@ fn world_to_hex(world_x: f32, world_z: f32, hex_width: f32, hex_height: f32) -> 
                 let candidate = HexCoord::new(approx_column + dc, approx_row + dr);
                 let candidate_pos =
                     hex_to_world_position(candidate.column, candidate.row, hex_width, hex_height);
-                let dist_sq = (candidate_pos.x - world_x).powi(2)
-                    + (candidate_pos.z - world_z).powi(2);
+                let dist_sq =
+                    (candidate_pos.x - world_x).powi(2) + (candidate_pos.z - world_z).powi(2);
                 if dist_sq < best_dist {
                     best_dist = dist_sq;
                     best_coord = candidate;
@@ -357,8 +352,8 @@ fn world_to_hex(world_x: f32, world_z: f32, hex_width: f32, hex_height: f32) -> 
                 let candidate = HexCoord::new(approx_column + dc, approx_row + dr);
                 let candidate_pos =
                     hex_to_world_position(candidate.column, candidate.row, hex_width, hex_height);
-                let dist_sq = (candidate_pos.x - world_x).powi(2)
-                    + (candidate_pos.z - world_z).powi(2);
+                let dist_sq =
+                    (candidate_pos.x - world_x).powi(2) + (candidate_pos.z - world_z).powi(2);
                 if dist_sq < best_dist {
                     best_dist = dist_sq;
                     best_coord = candidate;
@@ -403,11 +398,14 @@ fn extract_meshes_from_node(
     meshes: &mut Vec<ExtractedMesh>,
 ) {
     let combined_translation = parent_transform.translation
-        + nalgebra_glm::quat_rotate_vec3(&parent_transform.rotation, &nalgebra_glm::vec3(
-            node.local_transform.translation.x * parent_transform.scale.x,
-            node.local_transform.translation.y * parent_transform.scale.y,
-            node.local_transform.translation.z * parent_transform.scale.z,
-        ));
+        + nalgebra_glm::quat_rotate_vec3(
+            &parent_transform.rotation,
+            &nalgebra_glm::vec3(
+                node.local_transform.translation.x * parent_transform.scale.x,
+                node.local_transform.translation.y * parent_transform.scale.y,
+                node.local_transform.translation.z * parent_transform.scale.z,
+            ),
+        );
     let combined_rotation = parent_transform.rotation * node.local_transform.rotation;
     let combined_scale = nalgebra_glm::vec3(
         parent_transform.scale.x * node.local_transform.scale.x,
@@ -718,8 +716,7 @@ fn create_instanced_tiles(
         let prefab_index = tile_type_to_prefab_index(*tile_type);
         let extracted_meshes = &prefab_meshes[prefab_index];
 
-        let tile_world_pos =
-            hex_to_world_position(coord.column, coord.row, hex_width, hex_depth);
+        let tile_world_pos = hex_to_world_position(coord.column, coord.row, hex_width, hex_depth);
 
         for extracted in extracted_meshes {
             let mat_hash = material_hash(&extracted.material);
@@ -816,14 +813,16 @@ impl HexWarState {
 
     fn clear_selection(&mut self, world: &mut World) {
         if let Some(selected) = self.selected_unit
-            && let Some(material) = world.get_material_mut(selected) {
-                material.base_color = [0.2, 0.6, 1.0, 1.0];
-            }
+            && let Some(material) = world.get_material_mut(selected)
+        {
+            material.base_color = [0.2, 0.6, 1.0, 1.0];
+        }
 
         if let Some(range_entity) = self.range_lines_entity
-            && let Some(visibility) = world.get_visibility_mut(range_entity) {
-                visibility.visible = false;
-            }
+            && let Some(visibility) = world.get_visibility_mut(range_entity)
+        {
+            visibility.visible = false;
+        }
 
         self.selected_unit = None;
         self.selection_state = SelectionState::None;
@@ -871,11 +870,8 @@ impl HexWarState {
             let t = movement.progress.clamp(0.0, 1.0);
             let smooth_t = t * t * (3.0 - 2.0 * t);
 
-            let current_position = nalgebra_glm::lerp(
-                &movement.start_position,
-                &movement.end_position,
-                smooth_t,
-            );
+            let current_position =
+                nalgebra_glm::lerp(&movement.start_position, &movement.end_position, smooth_t);
 
             if let Some(transform) = world.get_local_transform_mut(movement.entity) {
                 transform.translation = current_position;
@@ -1166,7 +1162,8 @@ impl State for HexWarState {
                 ];
 
                 for coord in initial_unit_coords {
-                    let position = hex_to_world_position(coord.column, coord.row, hex_width, hex_depth);
+                    let position =
+                        hex_to_world_position(coord.column, coord.row, hex_width, hex_depth);
                     let unit_entity = spawn_unit(world, position);
                     self.units.push(Unit {
                         entity: unit_entity,
@@ -1235,7 +1232,9 @@ impl State for HexWarState {
             self.needs_regeneration = false;
 
             for group in self.instanced_tile_groups.drain(..) {
-                world.queue_command(WorldCommand::DespawnRecursive { entity: group.entity });
+                world.queue_command(WorldCommand::DespawnRecursive {
+                    entity: group.entity,
+                });
             }
             if let Some(lines_entity) = self.lines_entity.take() {
                 world.queue_command(WorldCommand::DespawnRecursive {
@@ -1248,7 +1247,9 @@ impl State for HexWarState {
                 });
             }
             for unit in self.units.drain(..) {
-                world.queue_command(WorldCommand::DespawnRecursive { entity: unit.entity });
+                world.queue_command(WorldCommand::DespawnRecursive {
+                    entity: unit.entity,
+                });
             }
             self.coord_to_tile_type.clear();
             self.hovered_tile = None;
@@ -1315,7 +1316,8 @@ impl State for HexWarState {
             ];
 
             for coord in initial_unit_coords {
-                let position = hex_to_world_position(coord.column, coord.row, self.hex_width, self.hex_depth);
+                let position =
+                    hex_to_world_position(coord.column, coord.row, self.hex_width, self.hex_depth);
                 let unit_entity = spawn_unit(world, position);
                 self.units.push(Unit {
                     entity: unit_entity,
@@ -1345,21 +1347,22 @@ impl State for HexWarState {
             }
         }
 
-        let hovered_tile_coord: Option<HexCoord> =
-            if let Some(ray) = PickingRay::from_screen_position(world, mouse_pos) {
-                if let Some(hit_point) = ray.intersect_ground_plane(0.0) {
-                    let coord = world_to_hex(hit_point.x, hit_point.z, self.hex_width, self.hex_depth);
-                    if self.coord_to_tile_type.contains_key(&coord) {
-                        Some(coord)
-                    } else {
-                        None
-                    }
+        let hovered_tile_coord: Option<HexCoord> = if let Some(ray) =
+            PickingRay::from_screen_position(world, mouse_pos)
+        {
+            if let Some(hit_point) = ray.intersect_ground_plane(0.0) {
+                let coord = world_to_hex(hit_point.x, hit_point.z, self.hex_width, self.hex_depth);
+                if self.coord_to_tile_type.contains_key(&coord) {
+                    Some(coord)
                 } else {
                     None
                 }
             } else {
                 None
-            };
+            }
+        } else {
+            None
+        };
 
         if let Some(prev_hovered) = self.hovered_unit
             && Some(prev_hovered) != closest_unit
@@ -1480,7 +1483,10 @@ impl State for HexWarState {
                 ui.heading("Stats");
                 ui.label(format!("Units: {}", self.units.len()));
                 ui.label(format!("Tile coords: {}", self.coord_to_tile_type.len()));
-                ui.label(format!("Instanced groups: {}", self.instanced_tile_groups.len()));
+                ui.label(format!(
+                    "Instanced groups: {}",
+                    self.instanced_tile_groups.len()
+                ));
 
                 if let Some(selected) = self.selected_unit {
                     let unit_info = self.units.iter().find(|u| u.entity == selected);
