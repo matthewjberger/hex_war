@@ -1,2 +1,3 @@
+*.md
 /target
-dist/
+/dist
